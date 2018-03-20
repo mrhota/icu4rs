@@ -1,0 +1,15 @@
+[package]
+name = "icu4rs"
+version = "0.0.1"
+authors = ["A.J. Gardner <aaron.j.gardner@gmail.com>"]
+homepage = "https://github.com/mrhota/icu4rs"
+repository = "https://github.com/mrhota/icu4rs"
+readme = "README.md"
+keywords = ["locale", "i18n", "l10n", "unicode", "icu"]
+description = "Internationalization Components for Unicode for Rust"
+license = "Unlicense/MIT"
+
+[build-dependencies]
+byteorder = "1.2.1"
+
+[dependencies]
