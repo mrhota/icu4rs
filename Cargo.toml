@@ -9,7 +9,5 @@ keywords = ["locale", "i18n", "l10n", "unicode", "icu"]
 description = "Internationalization Components for Unicode for Rust"
 license = "Unlicense/MIT"
 
-[build-dependencies]
-byteorder = "1.2.1"
-
 [dependencies]
+byteorder = "1.2.1"
