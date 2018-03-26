@@ -52,8 +52,26 @@ impl DataFormat {
         match *self {
             ResourceBundle => (format_version[0] == 1 && format_version[1] >= 1) ||
                 format_version[0] == 2 || format_version[0] == 3,
+            Collation => format_version[0] == 5,
+            Dictionary => true,
+            Dat => format_version[0] == 1,
             Normalized2 => format_version[0] == 3,
-            _ => unimplemented!()
+            CharacterProperty => format_version[0] == 7,
+            BreakIteration => {
+                let ver = u32::from(format_version[0]) << 24 +
+                    u32::from(format_version[1]) << 16 +
+                    u32::from(format_version[2]) << 8 +
+                    u32::from(format_version[3]);
+                ver == 0x04000000
+            },
+            Spoof => (format_version[0] == 2 || format_version[1] != 0 || format_version[2] != 0 || format_version[3] != 0),
+            StringPrep => (format_version[0] == 0x3 && format_version[2] == 0x5 && format_version[3] == 0x2),
+            BiDi => format_version[0] == 2,
+            Case => format_version[0] == 3,
+            CharacterName => format_version[0] == 1,
+            ConverterAlias => (format_version[0] == 3 && format_version[1] == 0 && format_version[2] == 1),
+            Converter => format_version[0] == 6,
+            PropertyAlias => format_version[0] == 2
         }
     }
 }
@@ -239,13 +257,13 @@ mod tests {
     fn read_header_doesnt_fail() {
         // header from a real resource bundle
         let mut c = Cursor::new(vec![0x0,  0x20, 0xda, 0x27,
-                                                         0x0,  0x14, 0x0,  0x0,
-                                                         0x1,  0x0,  0x02, 0x0,
-                                                         0x52, 0x65, 0x73, 0x42,
-                                                         0x03, 0x0,  0x0,  0x0,
-                                                         0x01, 0x04, 0x0,  0x0,
-                                                         0x0,  0x0,  0x0,  0x0,
-                                                         0x0,  0x0,  0x0,  0x0]);
+                                     0x0,  0x14, 0x0,  0x0,
+                                     0x1,  0x0,  0x02, 0x0,
+                                     0x52, 0x65, 0x73, 0x42,
+                                     0x03, 0x0,  0x0,  0x0,
+                                     0x01, 0x04, 0x0,  0x0,
+                                     0x0,  0x0,  0x0,  0x0,
+                                     0x0,  0x0,  0x0,  0x0]);
         let r = read_header(&mut c, DataFormat::ResourceBundle).expect("Failed to read header");
         assert_eq!(r, 0x01040000u32);
     }
