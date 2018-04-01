@@ -1,8 +1,15 @@
-use std::io::{self, Error, ErrorKind, SeekFrom, prelude::*};
+#![feature(try_from)]
 
 extern crate byteorder;
 
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
+use std::convert::TryFrom;
+use std::io::{self, Error, ErrorKind, SeekFrom, prelude::*};
+use version::Version;
+
+pub mod version;
+
+pub type PiecewiseVersion = (u8, u8, u8, u8);
 
 const MAGIC1: u8 = 0xda;
 const MAGIC2: u8 = 0x27;
@@ -50,34 +57,39 @@ impl DataFormat {
     fn is_acceptable_version(&self, format_version: [u8; 4]) -> bool {
         use DataFormat::*;
         match *self {
-            ResourceBundle => (format_version[0] == 1 && format_version[1] >= 1) ||
-                format_version[0] == 2 || format_version[0] == 3,
+            ResourceBundle => {
+                (format_version[0] == 1 && format_version[1] >= 1) || format_version[0] == 2
+                    || format_version[0] == 3
+            }
             Collation => format_version[0] == 5,
             Dictionary => true,
             Dat => format_version[0] == 1,
             Normalized2 => format_version[0] == 3,
             CharacterProperty => format_version[0] == 7,
             BreakIteration => {
-                let ver = u32::from(format_version[0]) << 24 +
-                    u32::from(format_version[1]) << 16 +
-                    u32::from(format_version[2]) << 8 +
-                    u32::from(format_version[3]);
+                let ver = u32::from(format_version[0]) << 24 + u32::from(format_version[1])
+                    << 16 + u32::from(format_version[2])
+                    << 8 + u32::from(format_version[3]);
                 ver == 0x04000000
-            },
-            Spoof => (format_version[0] == 2 || format_version[1] != 0 || format_version[2] != 0 || format_version[3] != 0),
-            StringPrep => (format_version[0] == 0x3 && format_version[2] == 0x5 && format_version[3] == 0x2),
+            }
+            Spoof => {
+                format_version[0] == 2 || format_version[1] != 0 || format_version[2] != 0
+                    || format_version[3] != 0
+            }
+            StringPrep => {
+                format_version[0] == 0x3 && format_version[2] == 0x5 && format_version[3] == 0x2
+            }
             BiDi => format_version[0] == 2,
             Case => format_version[0] == 3,
             CharacterName => format_version[0] == 1,
-            ConverterAlias => (format_version[0] == 3 && format_version[1] == 0 && format_version[2] == 1),
+            ConverterAlias => {
+                format_version[0] == 3 && format_version[1] == 0 && format_version[2] == 1
+            }
             Converter => format_version[0] == 6,
-            PropertyAlias => format_version[0] == 2
+            PropertyAlias => format_version[0] == 2,
         }
     }
 }
-
-#[derive(Debug)]
-pub struct Header;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Order {
@@ -85,7 +97,7 @@ pub enum Order {
     LittleEndian,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct OrderedReader<R>
 where
     R: Read + Seek,
@@ -163,34 +175,71 @@ trait EndianReader: Read + Seek {
     }
 }
 
-pub fn read_header<B: Read + Seek>(bytes: &mut B, data_format: DataFormat) -> io::Result<u32> {
-    check_magic(bytes)?;
-    let big_endian = read_endianness(bytes)?;
-    let order = if big_endian == 1 {
-        Order::BigEndian
-    } else {
-        Order::LittleEndian
-    };
-    let mut reader = OrderedReader::wrap(bytes, order);
+#[derive(Clone, Copy, Debug)]
+pub struct ResourceBundleReader<R>
+where
+    R: Read + Seek,
+{
+    reader: OrderedReader<R>,
+    data_version: Version,
+    root_resource: u32,
+}
 
-    let header_size = read_header_size(&mut reader)?;
-    validate_format_version(&mut reader, data_format)?;
+impl<R> ResourceBundleReader<R>
+where
+    R: Read + Seek,
+{
+    pub fn try_init(mut bytes: R, data_format: DataFormat) -> io::Result<ResourceBundleReader<R>> {
+        check_magic(&mut bytes)?;
+        let order = if read_endianness(&mut bytes)? == 1 {
+            Order::BigEndian
+        } else {
+            Order::LittleEndian
+        };
+        let mut reader = OrderedReader::wrap(bytes, order);
+        let data_version = read_header(&mut reader, data_format)?;
+        let root_resource = <OrderedReader<R> as EndianReader>::read_u32(&mut reader)?;
+        Ok(ResourceBundleReader {
+            reader,
+            data_version: Version::try_from(data_version)?,
+            root_resource,
+        })
+    }
+}
 
-    let data_version = read_data_version(&mut reader)?;
+pub fn read_header<R>(
+    reader: &mut OrderedReader<R>,
+    data_format: DataFormat,
+) -> io::Result<PiecewiseVersion>
+where
+    R: Read + Seek,
+{
+    let header_size = read_header_size(reader)?;
+    validate_format_version(reader, data_format)?;
+
+    let data_version = read_data_version(reader)?;
     reader.seek(SeekFrom::Start(header_size.into()))?;
     Ok(data_version)
 }
 
-fn read_data_version<R: Read + Seek>(reader: &mut OrderedReader<R>) -> io::Result<u32> {
+fn read_data_version<R>(reader: &mut OrderedReader<R>) -> io::Result<PiecewiseVersion>
+where
+    R: Read + Seek,
+{
     reader.seek(SeekFrom::Start(20))?;
-    let data_version = u32::from(reader.read_u8()?) << 24 |
-        u32::from(reader.read_u8()?) << 16 |
-        u32::from(reader.read_u8()?) << 8 |
-        u32::from(reader.read_u8()?);
+    let data_version = (
+        reader.read_u8()? << 24,
+        reader.read_u8()? << 16,
+        reader.read_u8()? << 8,
+        reader.read_u8()?,
+    );
     Ok(data_version)
 }
 
-fn read_header_size<B: Read + Seek>(reader: &mut OrderedReader<B>) -> io::Result<u16> {
+fn read_header_size<R>(reader: &mut OrderedReader<R>) -> io::Result<u16>
+where
+    R: Read + Seek,
+{
     let header_size = reader.read_u16_from(SeekFrom::Start(0))?;
     let data_info_size = reader.read_u16_from(SeekFrom::Start(4))?;
     if data_info_size < 20 || header_size < (data_info_size + 4) {
@@ -199,18 +248,27 @@ fn read_header_size<B: Read + Seek>(reader: &mut OrderedReader<B>) -> io::Result
     Ok(header_size)
 }
 
-fn check_magic<B: Read + Seek>(bytes: &mut B) -> io::Result<()> {
+fn check_magic<B>(bytes: &mut B) -> io::Result<()>
+where
+    B: Read + Seek,
+{
     bytes.seek(SeekFrom::Start(2))?;
     let magic1 = bytes.read_u8()?;
     let magic2 = bytes.read_u8()?;
     if magic1 != MAGIC1 || magic2 != MAGIC2 {
-        Err(Error::new(ErrorKind::InvalidData, MAGIC_NUMBER_CHECK_FAILED))
+        Err(Error::new(
+            ErrorKind::InvalidData,
+            MAGIC_NUMBER_CHECK_FAILED,
+        ))
     } else {
         Ok(())
     }
 }
 
-fn read_endianness<B: Read + Seek>(bytes: &mut B) -> io::Result<u8> {
+fn read_endianness<B>(bytes: &mut B) -> io::Result<u8>
+where
+    B: Read + Seek,
+{
     bytes.seek(SeekFrom::Start(8))?;
     let big_endian = bytes.read_u8()?;
     let charset_family = bytes.read_u8()?;
@@ -222,14 +280,24 @@ fn read_endianness<B: Read + Seek>(bytes: &mut B) -> io::Result<u8> {
     }
 }
 
-fn validate_format_version<R: Read + Seek>(reader: &mut OrderedReader<R>, data_format: DataFormat) -> io::Result<()> {
+fn validate_format_version<R>(
+    reader: &mut OrderedReader<R>,
+    data_format: DataFormat,
+) -> io::Result<()>
+where
+    R: Read + Seek,
+{
     let val = data_format as u32;
     reader.seek(SeekFrom::Start(12))?;
-    let df = [reader.read_u8()?, reader.read_u8()?, reader.read_u8()?, reader.read_u8()?];
-    if  df[0] != ((val >> 24) as u8) ||
-        df[1] != ((val >> 16) as u8) ||
-        df[2] != ((val >>  8) as u8) ||
-        df[3] !=  (val        as u8) {
+    let df = [
+        reader.read_u8()?,
+        reader.read_u8()?,
+        reader.read_u8()?,
+        reader.read_u8()?,
+    ];
+    if df[0] != ((val >> 24) as u8) || df[1] != ((val >> 16) as u8) || df[2] != ((val >> 8) as u8)
+        || df[3] != (val as u8)
+    {
         return Err(Error::new(ErrorKind::InvalidInput, HEADER_CHECK_FAILED));
     }
     // format version starts at 16
@@ -237,11 +305,11 @@ fn validate_format_version<R: Read + Seek>(reader: &mut OrderedReader<R>, data_f
         reader.read_u8()?,
         reader.read_u8()?,
         reader.read_u8()?,
-        reader.read_u8()?
+        reader.read_u8()?,
     ];
     if !data_format.is_acceptable_version(format_version) {
         // TODO print data format and format_version bytes with error message
-        return Err(Error::new(ErrorKind::InvalidData, HEADER_CHECK_FAILED))
+        return Err(Error::new(ErrorKind::InvalidData, HEADER_CHECK_FAILED));
     }
 
     Ok(())
@@ -249,22 +317,19 @@ fn validate_format_version<R: Read + Seek>(reader: &mut OrderedReader<R>, data_f
 
 #[cfg(test)]
 mod tests {
-    use read_header;
     use DataFormat;
+    use ResourceBundleReader;
     use std::io::Cursor;
-
     #[test]
     fn read_header_doesnt_fail() {
         // header from a real resource bundle
-        let mut c = Cursor::new(vec![0x0,  0x20, 0xda, 0x27,
-                                     0x0,  0x14, 0x0,  0x0,
-                                     0x1,  0x0,  0x02, 0x0,
-                                     0x52, 0x65, 0x73, 0x42,
-                                     0x03, 0x0,  0x0,  0x0,
-                                     0x01, 0x04, 0x0,  0x0,
-                                     0x0,  0x0,  0x0,  0x0,
-                                     0x0,  0x0,  0x0,  0x0]);
-        let r = read_header(&mut c, DataFormat::ResourceBundle).expect("Failed to read header");
+        let mut c = Cursor::new(vec![
+            0x0, 0x20, 0xda, 0x27, 0x0, 0x14, 0x0, 0x0, 0x1, 0x0, 0x02, 0x0, 0x52, 0x65, 0x73,
+            0x42, 0x03, 0x0, 0x0, 0x0, 0x01, 0x04, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+            0x0,
+        ]);
+        let r = ResourceBundleReader::try_init(&mut c, DataFormat::ResourceBundle)
+            .expect("Failed to read header");
         assert_eq!(r, 0x01040000u32);
     }
 }
