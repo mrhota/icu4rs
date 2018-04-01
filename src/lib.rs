@@ -205,6 +205,10 @@ where
             root_resource,
         })
     }
+
+    pub fn version(&self) -> Version {
+        self.data_version
+    }
 }
 
 pub fn read_header<R>(
@@ -228,9 +232,9 @@ where
 {
     reader.seek(SeekFrom::Start(20))?;
     let data_version = (
-        reader.read_u8()? << 24,
-        reader.read_u8()? << 16,
-        reader.read_u8()? << 8,
+        reader.read_u8()?,
+        reader.read_u8()?,
+        reader.read_u8()?,
         reader.read_u8()?,
     );
     Ok(data_version)
@@ -320,16 +324,23 @@ mod tests {
     use DataFormat;
     use ResourceBundleReader;
     use std::io::Cursor;
+    use Version;
     #[test]
     fn read_header_doesnt_fail() {
         // header from a real resource bundle
         let mut c = Cursor::new(vec![
-            0x0, 0x20, 0xda, 0x27, 0x0, 0x14, 0x0, 0x0, 0x1, 0x0, 0x02, 0x0, 0x52, 0x65, 0x73,
-            0x42, 0x03, 0x0, 0x0, 0x0, 0x01, 0x04, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
-            0x0,
+            0x0, 0x20, 0xda, 0x27,
+            0x0, 0x14, 0x0, 0x0,
+            0x1, 0x0, 0x02, 0x0,
+            0x52, 0x65, 0x73, 0x42,
+            0x03, 0x0, 0x0, 0x0,
+            0x01, 0x04, 0x0, 0x0,
+            0x0, 0x0, 0x0, 0x0,
+            0x0, 0x0, 0x0, 0x0,
+            0x01, 0x04, 0x0, 0x0,
         ]);
         let r = ResourceBundleReader::try_init(&mut c, DataFormat::ResourceBundle)
             .expect("Failed to read header");
-        assert_eq!(r, 0x01040000u32);
+        assert_eq!(r.version(), Version::Unicode10_0((0x01, 0x04, 0x0, 0x0)));
     }
 }
