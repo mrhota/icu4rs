@@ -1,4 +1,5 @@
 #![feature(try_from)]
+#![allow(dead_code)]
 
 extern crate byteorder;
 
@@ -8,8 +9,7 @@ use std::io::{self, Error, ErrorKind, SeekFrom, prelude::*};
 use version::Version;
 
 pub mod version;
-
-pub type PiecewiseVersion = (u8, u8, u8, u8);
+use version::PiecewiseVersion;
 
 const MAGIC1: u8 = 0xda;
 const MAGIC2: u8 = 0x27;
@@ -18,6 +18,22 @@ const CHAR_SIZE: u8 = 2;
 
 const MAGIC_NUMBER_CHECK_FAILED: &str = "ICU data file error: Not an ICU data file";
 const HEADER_CHECK_FAILED: &str = "ICU data file error: Header authentication failed, please check if you have a valid ICU data file";
+
+/// Indices for the indexes[] array, located after the header, and
+/// directly after the root resource.
+const RES_INDEX_LENGTH: u64 = 0;
+const RES_INDEX_KEYS_TOP: u64 = 1;
+const RES_INDEX_RESOURCES_TOP: u64 = 2;
+const RES_INDEX_BUNDLE_TOP: u64 = 3;
+const RES_INDEX_MAX_TABLE_LENGTH: u64 = 4;
+const RES_INDEX_ATTRIBUTES: u64 = 5;
+const RES_INDEX_16BIT_TOP: u64 = 6;
+const RES_INDEX_POOL_CHECKSUM: u64 = 7;
+
+// resource attribute bits
+const RES_ATT_NO_FALLBACK: u32 = 1;
+const RES_ATT_IS_POOL_BUNDLE: u32 = 2;
+const RES_ATT_USES_POOL_BUNDLE: u32 = 4;
 
 #[derive(Clone, Copy, Debug)]
 pub enum DataFormat {
@@ -183,8 +199,14 @@ where
     reader: OrderedReader<R>,
     data_version: Version,
     root_resource: u32,
+    no_fallback: bool,
+    is_pool_bundle: bool,
+    uses_pool_bundle: bool,
+    pool_string_index_limit: u32,
+    pool_string_index_16_limit: u32,
 }
 
+#[allow(unused_variables)]
 impl<R> ResourceBundleReader<R>
 where
     R: Read + Seek,
@@ -197,24 +219,86 @@ where
             Order::LittleEndian
         };
         let mut reader = OrderedReader::wrap(bytes, order);
-        let data_version = read_header(&mut reader, data_format)?;
+        let (header_size, data_version) = read_header(&mut reader, data_format)?;
         let root_resource = <OrderedReader<R> as EndianReader>::read_u32(&mut reader)?;
+        let offset = |n| {
+            header_size as u64 + 4 + n
+        };
+
+        let indexes_0 = EndianReader::read_u32(&mut reader)?;
+        let indexes_length = indexes_0 & 0xff;
+        if indexes_length as u64 <= RES_INDEX_MAX_TABLE_LENGTH {
+            return Err(Error::new(ErrorKind::InvalidData, "not enough indexes"));
+        }
+
+        let mut no_fallback = false;
+        let mut is_pool_bundle = false;
+        let mut uses_pool_bundle = false;
+        let mut pool_string_index_limit = 0;
+        let mut pool_string_index_16_limit = 0;
+
+        reader.seek(SeekFrom::Start(offset(RES_INDEX_BUNDLE_TOP)))?;
+        let max_offset = EndianReader::read_u32(&mut reader)? - 1;
+
+        reader.seek(SeekFrom::Start(16))?;
+        let file_format_major_version = reader.read_u8()?;
+        if file_format_major_version >= 3 {
+            pool_string_index_limit = indexes_0 >> 8;
+        }
+
+        if indexes_length as u64 > RES_INDEX_ATTRIBUTES {
+            reader.seek(SeekFrom::Start(offset(RES_INDEX_ATTRIBUTES)))?;
+            let att = EndianReader::read_u32(&mut reader)?;
+            no_fallback = (att & RES_ATT_NO_FALLBACK) != 0;
+            is_pool_bundle = (att & RES_ATT_IS_POOL_BUNDLE) != 0;
+            uses_pool_bundle = (att & RES_ATT_USES_POOL_BUNDLE) != 0;
+            pool_string_index_limit |= (att & 0xf000) << 12; // bits 15..12 -> 27..24
+            pool_string_index_16_limit = att >> 16;
+        }
+
+        let key_bytes: Vec<u8>;
+        let mut local_key_limit = 0;
+
+        let keys_bottom = 1 + indexes_length;
+        reader.seek(SeekFrom::Start(offset(RES_INDEX_KEYS_TOP)))?;
+        let keys_top = EndianReader::read_u32(&mut reader)?;
+        if keys_top > keys_bottom {
+            if is_pool_bundle {
+                key_bytes = Vec::with_capacity((keys_top - keys_bottom) as usize);
+            } else {
+                local_key_limit = (keys_top as usize) << 2;
+                key_bytes = Vec::with_capacity(local_key_limit);
+            }
+            
+        } else {
+            key_bytes = Vec::new();
+        }
+
         Ok(ResourceBundleReader {
             reader,
             data_version: Version::try_from(data_version)?,
             root_resource,
+            no_fallback,
+            is_pool_bundle,
+            uses_pool_bundle,
+            pool_string_index_limit,
+            pool_string_index_16_limit,
         })
     }
 
     pub fn version(&self) -> Version {
         self.data_version
     }
+
+    pub fn root_resource(&self) -> u32 {
+        self.root_resource
+    }
 }
 
 pub fn read_header<R>(
     reader: &mut OrderedReader<R>,
     data_format: DataFormat,
-) -> io::Result<PiecewiseVersion>
+) -> io::Result<(u16, PiecewiseVersion)>
 where
     R: Read + Seek,
 {
@@ -223,7 +307,7 @@ where
 
     let data_version = read_data_version(reader)?;
     reader.seek(SeekFrom::Start(header_size.into()))?;
-    Ok(data_version)
+    Ok((header_size, data_version))
 }
 
 fn read_data_version<R>(reader: &mut OrderedReader<R>) -> io::Result<PiecewiseVersion>
@@ -324,7 +408,7 @@ mod tests {
     use DataFormat;
     use ResourceBundleReader;
     use std::io::Cursor;
-    use Version;
+    use version::Version;
     #[test]
     fn read_header_doesnt_fail() {
         // header from a real resource bundle
@@ -337,7 +421,10 @@ mod tests {
             0x01, 0x04, 0x0, 0x0,
             0x0, 0x0, 0x0, 0x0,
             0x0, 0x0, 0x0, 0x0,
-            0x01, 0x04, 0x0, 0x0,
+            0x20, 0x0, 0x18, 0x78,
+            0x0, 0xcb, 0x92, 0x08,
+            0x0, 0x0, 0x0, 0x09,
+            0x0, 0x0, 0x18, 0x92,
         ]);
         let r = ResourceBundleReader::try_init(&mut c, DataFormat::ResourceBundle)
             .expect("Failed to read header");

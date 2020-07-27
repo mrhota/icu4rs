@@ -1,7 +1,7 @@
 use std::convert::TryFrom;
 use std::io;
 
-use PiecewiseVersion;
+pub type PiecewiseVersion = (u8, u8, u8, u8);
 
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, Ord, PartialOrd, Eq, PartialEq)]
